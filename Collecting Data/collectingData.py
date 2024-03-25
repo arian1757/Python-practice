@@ -5,77 +5,30 @@ import json
 import threading
 import queue
 import asyncio
-from insert_DB  import SaveToDB
+# from insert_DB  import SaveToDB
 
 
-params ={
-    'symbol':'ETHUSDT',
-    'trading_metrics':{'start_time': int((dt.datetime.now() - dt.timedelta(days=30)).timestamp() * 1000),
-                       'limit':500,
-                       'period':'5m'
 
-    }
+        
 
-}
 
-APIs = {
-    'Binance':{
-        'EndPoint': {
-            'trading_metrics':{'openInterest':'https://fapi.binance.com/futures/data/openInterestHist',
-                               'accountRatio':'https://fapi.binance.com/futures/data/topLongShortAccountRatio',
-                                'positionRatio':'https://fapi.binance.com/futures/data/topLongShortPositionRatio',
-                                'gaccountRatio':'https://fapi.binance.com/futures/data/globalLongShortAccountRatio',
-                                'longshortRatio':'https://fapi.binance.com/futures/data/takerlongshortRatio'}
-        }
-    }
-    
 
-}
-def openInterest(url,parameter,event,data_queue):
+def fetch_data (url,parameter,event,data_queue, column_name):
+
     response = requests.get(url, params=parameter)
-    data = json.loads(response.text)
-    data = pd.DataFrame(data)
-    params['trading_metrics']['start_time'] = data.iloc[-1,3]
     
+    data = json.loads(response.text)
+    
+    data = pd.DataFrame(data)
+    
+    data.columns = column_name
+    
+   
     data_queue.put(data)
     event.set()
 
-def accountRatio(url,parameter,event,data_queue):
-    response = requests.get(url, params=parameter)
-    data = json.loads(response.text)
-    data = pd.DataFrame(data)
-    data.columns = ['symbol','longShortRatioA','longAccountA','shortAccountA','timestamp']
-    
-    data_queue.put(data)
-    event.set()
-    
-def positionRatio(url,parameter,event,data_queue):
-    response = requests.get(url, params=parameter)
-    data = json.loads(response.text)
-    data = pd.DataFrame(data)
-    data.columns =['symbol','longShortRatioP','longAccountP','shortAccountP','timestamp']
-    
-    data_queue.put(data)
-    event.set()
-    
-def gaccountRatio(url,parameter,event,data_queue):
-    response = requests.get(url, params=parameter)
-    data = json.loads(response.text)
-    data = pd.DataFrame(data)
-    data.columns = ['symbol','longShortRatioG','longAccountG','shortAccountG','timestamp']
-    
-    data_queue.put(data)
-    event.set()
-    
-def longshortRatio(url,parameter,event,data_queue):
-    response = requests.get(url, params=parameter)
-    data = json.loads(response.text)
-    data = pd.DataFrame(data)
-    
-    data_queue.put(data)
-    event.set()
 
-def concat_data(data_queue):
+def concat_data(data_queue,param,column_order):
     all_data = data_queue.get()
 
     for _ in range(data_queue.qsize()):
@@ -85,37 +38,46 @@ def concat_data(data_queue):
 
         
         all_data = all_data.merge(data, on='timestamp', how='left', suffixes=('_left', '_right'))
-
-    column_order = ["timestamp", "symbol", "longShortRatioA", "longAccountA", "shortAccountA",
-                "longShortRatioP", "longAccountP", "shortAccountP", "longShortRatioG",
-                "longAccountG", "shortAccountG", "buySellRatio", "sellVol", "buyVol",
-                "sumOpenInterest", "sumOpenInterestValue"]
+    
+    
     # Reorder columns based on the specified order
-    all_data = all_data.reindex(columns=column_order)
+    param['startTime'] = all_data['timestamp'].iloc[-1]
+    all_data = all_data[column_order]
+    all_data.to_csv('dataa.csv')
+    # all_data = all_data.reindex(columns=column_order)
     
-    return all_data
     
+    return all_data,param
+i = 0  
 def save_data_to_DB(data):
-    if insert_db.save_to_database('trading_metrics',data):
-        print('done!')
+    global i
+    data.to_csv(f'data{i}.csv')
+    i+=1
+    # if insert_db.save_to_database('trading_metrics',data):
+    #     print('done!')
     
-def trading_metrics(data:dict,param:dict):
-    start_time = param['start_time']
+def collecting_data(data:dict,param:dict):
+    start_time = param['startTime']
+    period = list(param.items())[3][1]
     
-    if int((dt.datetime.now()).timestamp() * 1000) - start_time < 5 * 60 * 1000:
+    if int((dt.datetime.now()).timestamp() * 1000) - start_time < int(period[:-1]) * 60 * 1000:
         return print('done')
     
     
-    end_time = start_time+5*60*1000*(int(param['limit']))
-    parameters = {'symbol':params['symbol'], 'startTime':start_time,'endTime':end_time, 'limit':param['limit'],
-             'period':param['period'] }
-    func_names = list(data['EndPoint']['trading_metrics'].keys())
-    url =list(data['EndPoint']['trading_metrics'].values())
+    end_time = start_time+int(period[:-1])*60*1000*(int(param['limit']))
+  
+    param['endTime'] = end_time
+    
+    
+    urls = [data[i]['Endpoints'] for i in list(data.keys())[:-1]]
+ 
     threads = []
     data_queue = queue.Queue()
-    events = [threading.Event() for _ in range(len(func_names))]
-    for func_name, url, event in zip(func_names, url, events):
-        thread = threading.Thread(target=globals()[func_name], args=(url, parameters, event, data_queue))
+    events = [threading.Event() for _ in range(len(data.keys())-1)]
+    columns_names =[data[i]['columns'] for i in list(data.keys())[:-1]]
+    for  url, event, column_name in zip( urls, events,columns_names ):
+        
+        thread = threading.Thread(target=fetch_data, args=(url, param, event, data_queue, column_name))
         threads.append(thread)
         thread.start()
     for event in events:
@@ -125,11 +87,11 @@ def trading_metrics(data:dict,param:dict):
     # asyncio.set_event_loop(loop)
     # final_event = asyncio.Event()
     # loop.run_until_complete(concat_data(data_queue, final_event))
-    all_data = concat_data(data_queue)
+    (all_data, param) = concat_data(data_queue,param,data['column_order'])
 
     save_data_to_DB(all_data)
     
-    return trading_metrics(data,param)
+    return collecting_data(data,param)
    
     
 if __name__ == "__main__":
